@@ -8,18 +8,22 @@ import numpy as np
 import torch.nn.functional as F
 
 
+# Learn a 3x3 affine transformation matrix from input point cloud matrix
+# Input: [batch size, N, 3]
+# Output: [batch size, 3, 3]
 class STN3d(nn.Module):
     def __init__(self):
         super(STN3d, self).__init__()
-        self.conv1 = torch.nn.Conv1d(3, 64, 1)
+        self.conv1 = torch.nn.Conv1d(3, 64, 1) # Apply conv to every (x, y, z) coordinates, each coord is tranfrm to a 64 length feat vector
         self.conv2 = torch.nn.Conv1d(64, 128, 1)
         self.conv3 = torch.nn.Conv1d(128, 1024, 1)
+        # FC layer, used to learn the final transformation matrix
         self.fc1 = nn.Linear(1024, 512)
         self.fc2 = nn.Linear(512, 256)
         self.fc3 = nn.Linear(256, 9)
         self.relu = nn.ReLU()
 
-        self.bn1 = nn.BatchNorm1d(64)
+        self.bn1 = nn.BatchNorm1d(64) # Apply normalization to each feat vector(row)
         self.bn2 = nn.BatchNorm1d(128)
         self.bn3 = nn.BatchNorm1d(1024)
         self.bn4 = nn.BatchNorm1d(512)
@@ -31,7 +35,9 @@ class STN3d(nn.Module):
         x = F.relu(self.bn1(self.conv1(x)))
         x = F.relu(self.bn2(self.conv2(x)))
         x = F.relu(self.bn3(self.conv3(x)))
+        # Get max value of each column, which means each feature is pooled into one value, 1024 features in total, converted to a 1024 length vector
         x = torch.max(x, 2, keepdim=True)[0]
+        # Infer the batch size dimension, the feature length is 1024
         x = x.view(-1, 1024)
 
         x = F.relu(self.bn4(self.fc1(x)))
@@ -41,11 +47,11 @@ class STN3d(nn.Module):
         iden = Variable(torch.from_numpy(np.array([1,0,0,0,1,0,0,0,1]).astype(np.float32))).view(1,9).repeat(batchsize,1)
         if x.is_cuda:
             iden = iden.cuda()
-        x = x + iden
-        x = x.view(-1, 3, 3)
+        x = x + iden # Learned 3x3 matrix plus identity matrix, to avoid singular matrix?
+        x = x.view(-1, 3, 3) # Output Nx3x3 matrix
         return x
 
-
+# Similar to STN3d, but input size is specified, in order to apply affine transfrm to feature instead of raw input point cloud
 class STNkd(nn.Module):
     def __init__(self, k=64):
         super(STNkd, self).__init__()
@@ -84,6 +90,7 @@ class STNkd(nn.Module):
         x = x.view(-1, self.k, self.k)
         return x
 
+# PointNet backbone
 class PointNetfeat(nn.Module):
     def __init__(self, global_feat = True, feature_transform = False):
         super(PointNetfeat, self).__init__()
@@ -100,13 +107,15 @@ class PointNetfeat(nn.Module):
             self.fstn = STNkd(k=64)
 
     def forward(self, x):
+        # Apply T-Net transform on input point cloud
         n_pts = x.size()[2]
         trans = self.stn(x)
         x = x.transpose(2, 1)
-        x = torch.bmm(x, trans)
+        x = torch.bmm(x, trans) # batch multiplication
         x = x.transpose(2, 1)
         x = F.relu(self.bn1(self.conv1(x)))
-
+        
+        # Apply T-Net transform on feature
         if self.feature_transform:
             trans_feat = self.fstn(x)
             x = x.transpose(2,1)
@@ -118,6 +127,10 @@ class PointNetfeat(nn.Module):
         pointfeat = x
         x = F.relu(self.bn2(self.conv2(x)))
         x = self.bn3(self.conv3(x))
+        
+        # Max pooling over Nx1024 matrix, and obtain a 1024 vector
+        # Therefore, PointNet backbone is not sensitive to number of points of the input
+        # Because no matter how may points are in the input, they will be finally pooled into a 1024 feature vector
         x = torch.max(x, 2, keepdim=True)[0]
         x = x.view(-1, 1024)
         if self.global_feat:
@@ -126,6 +139,8 @@ class PointNetfeat(nn.Module):
             x = x.view(-1, 1024, 1).repeat(1, 1, n_pts)
             return torch.cat([x, pointfeat], 1), trans, trans_feat
 
+# MLP for classification
+# Input is the output from backbone
 class PointNetCls(nn.Module):
     def __init__(self, k=2, feature_transform=False):
         super(PointNetCls, self).__init__()
