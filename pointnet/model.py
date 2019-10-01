@@ -123,7 +123,8 @@ class PointNetfeat(nn.Module):
             x = x.transpose(2,1)
         else:
             trans_feat = None
-
+        
+        # Trick: apply a shared-weight MLP to each feature vector = apply a Conv1D to the nx64 input
         pointfeat = x
         x = F.relu(self.bn2(self.conv2(x)))
         x = self.bn3(self.conv3(x))
